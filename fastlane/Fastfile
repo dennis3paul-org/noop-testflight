@@ -5,6 +5,7 @@
 # is not stored in this repository. The build workflow checks it out into ./noop.
 
 require "json"
+require "open3"
 require "time"
 require "xcodeproj"
 
@@ -29,6 +30,8 @@ BUILD_INFO_PATH = File.join(GITHUB_WORKSPACE, "build_info.json")
 # Same convention as Loop: the Apple Team ID makes the bundle ids unique to you.
 BUNDLE_ID_PREFIX = "com.#{TEAMID}"
 APP_ID = "#{BUNDLE_ID_PREFIX}.noop"
+# NOOP derives its App Group from the same prefix (see its project.yml).
+APP_GROUP_ID = "group.#{BUNDLE_ID_PREFIX}.noop.staging"
 
 # Xcode target => identifier registered with Apple.
 # Every target shares the App Group; the two apps also use HealthKit.
@@ -146,6 +149,33 @@ def apply_distribution_signing(profile_mapping)
   end
 
   project.save
+end
+
+# The App Groups a provisioning profile grants, read from the profile itself.
+def profile_app_groups(path)
+  xml, status = Open3.capture2("security", "cms", "-D", "-i", path)
+  return [] unless status.success?
+  section = xml.scrub[%r{<key>com\.apple\.security\.application-groups</key>\s*<array>(.*?)</array>}m, 1]
+  section ? section.scan(%r{<string>(.*?)</string>}).flatten : []
+end
+
+# Where match installed the profile for one identifier.
+def installed_profile_path(identifier)
+  path = ENV["sigh_#{identifier}_appstore_profile-path"]
+  return path if path && File.exist?(path)
+  folders = ["~/Library/Developer/Xcode/UserData/Provisioning Profiles", "~/Library/MobileDevice/Provisioning Profiles"]
+  Dir.glob(folders.map { |folder| File.join(File.expand_path(folder), "*.mobileprovision") }).find do |candidate|
+    xml, = Open3.capture2("security", "cms", "-D", "-i", candidate)
+    xml.scrub.include?("<string>match AppStore #{identifier}</string>")
+  end
+end
+
+# The NOOP identifiers whose installed profile does not grant the NOOP App Group.
+def targets_without_app_group
+  NOOP_TARGETS.values.reject do |info|
+    path = installed_profile_path(info[:id])
+    path && profile_app_groups(path).include?(APP_GROUP_ID)
+  end
 end
 
 def find_or_create_bundle_id(name, identifier, capabilities)
@@ -274,6 +304,31 @@ platform :ios do
       git_basic_authorization: match_git_auth,
       app_identifier: NOOP_APP_IDS
     )
+
+    # A profile made before the App Group was added to its identifier still
+    # looks valid to match, but Xcode refuses to sign with it. Recreate those.
+    stale = targets_without_app_group
+    unless stale.empty?
+      UI.important("Recreating the profiles that do not include the NOOP App Group yet: #{stale.map { |info| info[:name] }.join(', ')}")
+      match(
+        type: "appstore",
+        force: true,
+        git_basic_authorization: match_git_auth,
+        app_identifier: stale.map { |info| info[:id] }
+      )
+      stale = targets_without_app_group
+    end
+
+    if stale.empty?
+      UI.success("All four NOOP profiles include the App Group #{APP_GROUP_ID}.")
+    else
+      UI.user_error!(
+        "Apple's profiles do not include the App Group for: #{stale.map { |info| info[:name] }.join(', ')}. " \
+        "At https://developer.apple.com/account/resources/identifiers/list open each of these identifiers, " \
+        "click Configure (or Edit) next to App Groups, tick 'NOOP App Group', then Save. The App Group's own " \
+        "identifier must be exactly group.com.TEAMID.noop.staging, where TEAMID is your Apple Team ID."
+      )
+    end
   end
 
   desc "Validate Secrets"
