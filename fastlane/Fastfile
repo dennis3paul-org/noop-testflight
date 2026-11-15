@@ -178,6 +178,22 @@ def targets_without_app_group
   end
 end
 
+# Prints which App Groups each installed profile grants, to show what Apple has
+# on file. Team IDs other than your own are replaced, because this log is public.
+def report_profile_app_groups
+  NOOP_TARGETS.each_value do |info|
+    path = installed_profile_path(info[:id])
+    if path.nil?
+      UI.message("#{info[:name]}: no installed profile found")
+      next
+    end
+    groups = profile_app_groups(path).map do |group|
+      group.gsub(/\b[A-Z0-9]{10}\b/) { |token| token == TEAMID ? token : "<another-team-id>" }
+    end
+    UI.message("#{info[:name]}: profile grants #{groups.empty? ? 'no App Groups' : groups.join(', ')}")
+  end
+end
+
 def find_or_create_bundle_id(name, identifier, capabilities)
   bundle_id = Spaceship::ConnectAPI::BundleId.find(identifier) || Spaceship::ConnectAPI::BundleId.create(
     name: name,
@@ -319,9 +335,11 @@ platform :ios do
       stale = targets_without_app_group
     end
 
+    report_profile_app_groups
     if stale.empty?
       UI.success("All four NOOP profiles include the App Group #{APP_GROUP_ID}.")
     else
+      UI.important("Expected App Group: #{APP_GROUP_ID}")
       UI.user_error!(
         "Apple's profiles do not include the App Group for: #{stale.map { |info| info[:name] }.join(', ')}. " \
         "At https://developer.apple.com/account/resources/identifiers/list open each of these identifiers, " \
