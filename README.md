@@ -65,9 +65,6 @@ Run the numbered workflows from the **Actions** tab, in order.
 5. SKU: anything, for example `noop`.
 6. User Access: Full Access. Then Create.
 
-If you change the App Group or the identifiers later, run
-**3. Create Certificates** again.
-
 ### Install on your iPhone
 
 In App Store Connect open the app, then **TestFlight**, then **Internal
@@ -93,7 +90,11 @@ Optional variables (Settings, Secrets and variables, Actions, Variables):
 | `ENABLE_NUKE_CERTS` | Set to `true` to let the build renew your Distribution certificate when it has expired (once a year). This revokes and recreates the certificate for all your browser-build apps, exactly as Loop and Trio do. |
 
 To build a specific version once, start **4. Build NOOP** by hand and type a
-tag or branch into the box.
+tag or branch into the box. Starting it by hand always builds. Tick
+**only_if_new** to make a manual run follow the same rules as the weekly one.
+
+If you ever change the App Group or the identifiers at Apple, the next build
+notices that the provisioning profiles are out of date and recreates them.
 
 ## Good to know
 

@@ -7,6 +7,11 @@ on:
         description: "What to build. Leave empty for the newest NOOP release, or type a tag (v12.0.0) or a branch (main)."
         required: false
         default: ""
+      only_if_new:
+        description: "Behave like the weekly schedule: build only if NOOP has a new version or the last build is four weeks old."
+        type: boolean
+        required: false
+        default: false
   schedule:
     # Checks every Saturday at 08:23 UTC. It builds when NOOP has a new version,
     # and at least every four weeks so the TestFlight build never expires.
@@ -70,6 +75,7 @@ jobs:
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
           EVENT: ${{ github.event_name }}
+          ONLY_IF_NEW: ${{ inputs.only_if_new }}
           SCHEDULED_SYNC: ${{ vars.SCHEDULED_SYNC }}
           SCHEDULED_BUILD: ${{ vars.SCHEDULED_BUILD }}
         run: |
@@ -89,7 +95,7 @@ jobs:
           fi
 
           should_build=false
-          if [ "$EVENT" = "workflow_dispatch" ]; then
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$ONLY_IF_NEW" != "true" ]; then
             should_build=true
             reason="started by hand"
           elif [ "$SHA" != "$last_sha" ] && [ "$SCHEDULED_SYNC" != "false" ]; then
