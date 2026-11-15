@@ -166,9 +166,11 @@ platform :ios do
   lane :build_noop do
     setup_ci if ENV["CI"]
 
+    prepare_noop_project
+
     api_key = asc_api_key
 
-    # Fails within a minute, before the long compile, if the app record is missing.
+    # Fails here, before the long compile, if the app record is missing.
     begin
       previous_build_number = latest_testflight_build_number(
         app_identifier: APP_ID,
@@ -184,8 +186,6 @@ platform :ios do
       end
       raise
     end
-
-    prepare_noop_project
 
     # NOOP numbers its own builds. Keep that number when it is new to TestFlight,
     # otherwise count up from the last upload so a rebuild is never rejected as a duplicate.
