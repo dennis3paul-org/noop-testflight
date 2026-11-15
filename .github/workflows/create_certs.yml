@@ -1,0 +1,123 @@
+name: 3. Create Certificates
+run-name: Create Certificates
+
+on: [workflow_call, workflow_dispatch]
+
+env:
+  TEAMID: ${{ secrets.TEAMID }}
+  LC_ALL: en_US.UTF-8
+  LANG: en_US.UTF-8
+  GH_PAT: ${{ secrets.GH_PAT }}
+  GH_TOKEN: ${{ secrets.GH_PAT }}
+  MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+  FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+  FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+  FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  create_certs:
+    name: Certificates
+    needs: validate
+    runs-on: macos-26
+    outputs:
+      new_certificate_needed: ${{ steps.set_output.outputs.new_certificate_needed }}
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v5
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Keep signing details out of the public log
+        run: ./.github/scripts/quiet_fastlane.sh
+
+      # Apple rejects API tokens when the runner clock has drifted (https://github.com/actions/runner/issues/2996)
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      # Reuses the Distribution certificate in Match-Secrets and creates the NOOP
+      # provisioning profiles when they are missing or no longer valid.
+      - name: Create or update the NOOP provisioning profiles
+        id: certs
+        run: |
+          set -o pipefail
+          if bundle exec fastlane certs 2>&1 | tee certs.log; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            # Not fatal yet: an expired certificate is handled by the next steps.
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the Distribution certificate
+        run: bundle exec fastlane check_and_renew_certificates
+
+      - name: Set output and annotations
+        id: set_output
+        run: |
+          CERT_STATUS_FILE="${{ github.workspace }}/fastlane/new_certificate_needed.txt"
+          ENABLE_NUKE_CERTS="${{ vars.ENABLE_NUKE_CERTS }}"
+          FORCE_NUKE_CERTS="${{ vars.FORCE_NUKE_CERTS }}"
+          CERTS_OK="${{ steps.certs.outputs.ok }}"
+
+          if [ -f "$CERT_STATUS_FILE" ]; then
+            CERT_STATUS=$(tr -d '\n\r' < "$CERT_STATUS_FILE")
+          else
+            echo "Certificate status file not found. Defaulting to false."
+            CERT_STATUS=false
+          fi
+          echo "new_certificate_needed: $CERT_STATUS"
+          echo "new_certificate_needed=$CERT_STATUS" >> "$GITHUB_OUTPUT"
+
+          if [ "$CERT_STATUS" = "true" ] && [ "$ENABLE_NUKE_CERTS" != "true" ]; then
+            echo "::error::No valid Distribution certificate was found, and automatic renewal is off because the variable ENABLE_NUKE_CERTS is not 'true'. Run '3. Create Certificates' in one of your other apps (for example Trio), or set ENABLE_NUKE_CERTS to true, then try again."
+            exit 1
+          fi
+
+          if [ "$CERT_STATUS" != "true" ] && [ "$CERTS_OK" != "true" ] && [ "$FORCE_NUKE_CERTS" != "true" ]; then
+            echo "::error::The Distribution certificate is valid, but the NOOP provisioning profiles could not be created. Open the 'Create or update the NOOP provisioning profiles' step for the reason. The usual cause is that '2. Add Identifiers' has not been run yet."
+            exit 1
+          fi
+
+          if [ "$FORCE_NUKE_CERTS" = "true" ]; then
+            echo "::warning::Certificates are being revoked and recreated because the variable FORCE_NUKE_CERTS is 'true'. Set it back to false afterwards."
+          fi
+
+  # Revokes and recreates the Distribution certificate, but only when it is
+  # missing or expired AND you opted in with the variable ENABLE_NUKE_CERTS
+  # (or forced it with FORCE_NUKE_CERTS). Same behaviour as Loop and Trio.
+  nuke_certs:
+    name: Nuke certificates
+    needs: [validate, create_certs]
+    runs-on: macos-26
+    if: ${{ (needs.create_certs.outputs.new_certificate_needed == 'true' && vars.ENABLE_NUKE_CERTS == 'true') || vars.FORCE_NUKE_CERTS == 'true' }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v5
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Keep signing details out of the public log
+        run: ./.github/scripts/quiet_fastlane.sh
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Run Fastlane nuke_certs
+        run: bundle exec fastlane nuke_certs
+
+      - name: Recreate the Distribution certificate and NOOP profiles
+        run: bundle exec fastlane certs
+
+      - name: Add annotations
+        if: ${{ success() }}
+        run: |
+          echo "::warning::All Distribution certificates and TestFlight profiles were revoked and recreated."
+          echo "::warning::Your other browser-build apps renew their own profiles the next time they build (or run '3. Create Certificates' in each)."
+          echo "::warning::Apps already installed from TestFlight keep working."

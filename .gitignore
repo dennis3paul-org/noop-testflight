@@ -1,0 +1,19 @@
+# The NOOP source is checked out here during a build. It is never committed.
+/noop/
+
+# Build output
+*.ipa
+*.dSYM.zip
+/build_info.json
+/buildlog/
+/artifacts/
+*.log
+
+# fastlane
+fastlane/report.xml
+fastlane/README.md
+fastlane/new_certificate_needed.txt
+.bundle/
+vendor/
+
+.DS_Store

@@ -1,0 +1,240 @@
+name: 4. Build NOOP
+run-name: Build NOOP${{ inputs.ref && format(' ({0})', inputs.ref) || '' }}
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "What to build. Leave empty for the newest NOOP release, or type a tag (v12.0.0) or a branch (main)."
+        required: false
+        default: ""
+  schedule:
+    # Checks every Saturday at 08:23 UTC. It builds when NOOP has a new version,
+    # and at least every four weeks so the TestFlight build never expires.
+    - cron: "23 8 * * 6"
+
+env:
+  UPSTREAM_REPO: ryanbr/noop
+
+concurrency:
+  group: build-noop
+  cancel-in-progress: false
+
+jobs:
+  check_status:
+    name: Check status to decide whether to build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      reason: ${{ steps.decide.outputs.reason }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v5
+
+      # GitHub pauses the schedule of a repository that has had no activity for
+      # 60 days. Re-enabling the workflow resets that timer.
+      - name: Keep the weekly schedule alive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/build_noop.yml/enable" || true
+
+      - name: Find the NOOP version to build
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_REF: ${{ inputs.ref || vars.NOOP_REF }}
+        run: |
+          set -euo pipefail
+
+          ref="${REQUESTED_REF:-}"
+          if [ -z "$ref" ] || [ "$ref" = "latest" ]; then
+            ref=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+            echo "Newest NOOP release: $ref"
+          fi
+
+          if ! sha=$(gh api "repos/$UPSTREAM_REPO/commits/$ref" --jq .sha); then
+            echo "::error::'$ref' is not a tag, branch or commit of $UPSTREAM_REPO."
+            exit 1
+          fi
+
+          echo "Building $UPSTREAM_REPO at $ref ($sha)"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          EVENT: ${{ github.event_name }}
+          SCHEDULED_SYNC: ${{ vars.SCHEDULED_SYNC }}
+          SCHEDULED_BUILD: ${{ vars.SCHEDULED_BUILD }}
+        run: |
+          set -euo pipefail
+
+          # last_build.json is written by the build job after every upload.
+          last_sha=""
+          last_date=""
+          if [ -f last_build.json ]; then
+            last_sha=$(jq -r '.upstream_sha // ""' last_build.json)
+            last_date=$(jq -r '.built_at // ""' last_build.json)
+          fi
+
+          age_days=9999
+          if [ -n "$last_date" ]; then
+            age_days=$(( ( $(date -u +%s) - $(date -u -d "$last_date" +%s) ) / 86400 ))
+          fi
+
+          should_build=false
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            should_build=true
+            reason="started by hand"
+          elif [ "$SHA" != "$last_sha" ] && [ "$SCHEDULED_SYNC" != "false" ]; then
+            should_build=true
+            reason="NOOP has a new version"
+          elif [ "$age_days" -ge 27 ] && [ "$SCHEDULED_BUILD" != "false" ]; then
+            should_build=true
+            reason="the last build is $age_days days old"
+          else
+            reason="NOOP has nothing new and the last build is only $age_days days old"
+          fi
+
+          echo "Build: $should_build ($reason)"
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+
+  # When a scheduled run finds nothing new, cancel it so it shows as cancelled
+  # (grey). A green check then always means a new build went to TestFlight.
+  cancel_when_no_build:
+    name: Cancel run when there is nothing to build
+    needs: check_status
+    if: needs.check_status.outputs.should_build != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REASON: ${{ needs.check_status.outputs.reason }}
+        run: |
+          echo "Nothing to build: $REASON." >> "$GITHUB_STEP_SUMMARY"
+          gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+          # Keep the job alive until the cancellation lands.
+          sleep 300
+
+  # Makes sure the Distribution certificate and the NOOP profiles are in place.
+  check_certs:
+    name: Check certificates
+    needs: check_status
+    if: needs.check_status.outputs.should_build == 'true'
+    uses: ./.github/workflows/create_certs.yml
+    secrets: inherit
+
+  build:
+    name: Build
+    needs: [check_status, check_certs]
+    if: needs.check_status.outputs.should_build == 'true'
+    runs-on: macos-26
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      TEAMID: ${{ secrets.TEAMID }}
+      LC_ALL: en_US.UTF-8
+      LANG: en_US.UTF-8
+      GH_PAT: ${{ secrets.GH_PAT }}
+      FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+      FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+      FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      NOOP_UPSTREAM_REF: ${{ needs.check_status.outputs.ref }}
+      NOOP_UPSTREAM_SHA: ${{ needs.check_status.outputs.sha }}
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v5
+
+      # The NOOP source is not stored here. It is fetched fresh for every build.
+      - name: Checkout NOOP
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.check_status.outputs.sha }}
+          path: noop
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      # NOOP generates its Xcode project from project.yml with XcodeGen.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Keep signing details out of the public log
+        run: ./.github/scripts/quiet_fastlane.sh
+
+      # Apple rejects API tokens when the runner clock has drifted (https://github.com/actions/runner/issues/2996)
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      # Build signed NOOP IPA file
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_noop
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          log=$(ls -t buildlog/*.log 2>/dev/null | head -n 1 || true)
+          if [ -z "$log" ]; then
+            echo "No Xcode build log was written. The failure happened before or after compiling."
+            exit 0
+          fi
+          echo "----- errors in $log -----"
+          grep -n -E "(error|fatal error): |\*\* ARCHIVE FAILED \*\*|The following build commands failed" "$log" | grep -v -i "signing identity" | cut -c 1-600 | tail -n 80 || true
+          echo "----- end of log -----"
+          tail -n 40 "$log" | grep -v -i "signing identity" | cut -c 1-600 || true
+
+      # Upload to TestFlight
+      - name: Fastlane upload to TestFlight
+        env:
+          NOOP_UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+        run: bundle exec fastlane release
+
+      # Remembers what was built, so the weekly check can tell when NOOP has
+      # something new. The commit also counts as repository activity.
+      - name: Record this build
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version build_info.json)
+          build=$(jq -r .build build_info.json)
+
+          jq -n \
+            --arg repo "$UPSTREAM_REPO" \
+            --arg ref "$NOOP_UPSTREAM_REF" \
+            --arg sha "$NOOP_UPSTREAM_SHA" \
+            --arg version "$version" \
+            --argjson build "$build" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{upstream_repo: $repo, upstream_ref: $ref, upstream_sha: $sha, version: $version, build: $build, built_at: $built_at}' \
+            > last_build.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_build.json
+          git commit -m "Record build: NOOP $version ($build) from $NOOP_UPSTREAM_REF"
+          if ! git push origin "HEAD:$GITHUB_REF_NAME"; then
+            # Someone else pushed in the meantime. Replay this commit on top and retry.
+            git pull --rebase --autostash --quiet origin "$GITHUB_REF_NAME"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi
+
+          {
+            echo "### NOOP $version (build $build) is in TestFlight"
+            echo "Built from \`$UPSTREAM_REPO\` at \`$NOOP_UPSTREAM_REF\` (\`${NOOP_UPSTREAM_SHA:0:7}\`)."
+            echo "Open the TestFlight app on your iPhone to install it. The Apple Watch app comes with it."
+          } >> "$GITHUB_STEP_SUMMARY"

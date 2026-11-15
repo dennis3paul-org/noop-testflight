@@ -1,0 +1,59 @@
+name: 2. Add Identifiers
+run-name: Add Identifiers
+on:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  identifiers:
+    name: Add Identifiers
+    needs: validate
+    runs-on: macos-26
+    env:
+      TEAMID: ${{ secrets.TEAMID }}
+      LC_ALL: en_US.UTF-8
+      LANG: en_US.UTF-8
+      GH_PAT: ${{ secrets.GH_PAT }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+      FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+      FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v5
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Keep signing details out of the public log
+        run: ./.github/scripts/quiet_fastlane.sh
+
+      # Apple rejects API tokens when the runner clock has drifted (https://github.com/actions/runner/issues/2996)
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      # Registers the four NOOP identifiers (app, widgets, watch app, watch complications)
+      - name: Fastlane Provision
+        run: bundle exec fastlane identifiers
+
+      - name: Next steps
+        run: |
+          {
+            echo "### Identifiers created"
+            echo "Apple now knows these four identifiers (TEAMID is your 10-character Apple Team ID):"
+            echo ""
+            echo "| Name | Identifier |"
+            echo "|---|---|"
+            echo "| NOOP | com.TEAMID.noop |"
+            echo "| NOOP Widgets | com.TEAMID.noop.widgets |"
+            echo "| NOOP Watch | com.TEAMID.noop.watch |"
+            echo "| NOOP Watch Complications | com.TEAMID.noop.watch.complications |"
+            echo ""
+            echo "Two things can only be done by hand on Apple's website. See **One-time Apple setup** in README.md:"
+            echo "1. Create the App Group \`group.com.TEAMID.noop.staging\` and add it to all four identifiers."
+            echo "2. Create the NOOP app in App Store Connect."
+          } >> "$GITHUB_STEP_SUMMARY"
